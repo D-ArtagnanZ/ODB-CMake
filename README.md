@@ -1,4 +1,5 @@
 # ODB-CMake
+
 A CMake module for using the ODB ORM compiler
 
 ## Modules
@@ -48,9 +49,10 @@ Use the `odb_compile()` function to generate sources from your model headers:
 find_package(ODB REQUIRED COMPONENTS pgsql sqlite)
 
 odb_compile(
-  TARGET my_app
+  TARGETS my_app
   DATABASES pgsql sqlite
   SOURCES my_model.hxx another_model.hxx
+  MULTI_DATABASE dynamic # Enable multi-database mode
   # Optional arguments:
   # OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/odb_gen
   # PROFILES boost qt
@@ -59,6 +61,7 @@ odb_compile(
 ```
 
 This will:
+
 - Run the ODB compiler on your header files when building.
 - Add the generated `.cxx` files to your target.
 - Set up include directories and link the required runtime libraries.
