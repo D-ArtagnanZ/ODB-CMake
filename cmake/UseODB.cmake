@@ -7,7 +7,7 @@
 #
 # Function:
 #   odb_compile(
-#     TARGET <target>
+#     TARGETS <target1> [<target2> ...]
 #     [DB <db>] | [DATABASES <db1> <db2> ...]    # e.g. common, mysql, pgsql, sqlite, oracle, mssql
 #     SOURCES <header1.hxx> [header2.hxx ...]
 #
@@ -49,7 +49,6 @@ function(odb_compile)
     NO_AUTO_LINK
   )
   set(_OneValue
-    TARGET
     DB
     OUTPUT_DIR
     HEADER_SUFFIX
@@ -64,6 +63,7 @@ function(odb_compile)
     MULTI_DATABASE
   )
   set(_MultiValue
+    TARGETS
     SOURCES
     INCLUDE_DIRS
     DEFINITIONS
@@ -78,8 +78,8 @@ function(odb_compile)
   cmake_parse_arguments(PARSE_ARGV 0 ODB "${_Options}" "${_OneValue}" "${_MultiValue}")
 
   # Validate
-  if(NOT ODB_TARGET)
-    message(FATAL_ERROR "odb_compile: TARGET is required")
+  if(NOT ODB_TARGETS)
+    message(FATAL_ERROR "odb_compile: TARGETS is required")
   endif()
   if(NOT ODB_SOURCES)
     message(FATAL_ERROR "odb_compile: SOURCES is required")
@@ -87,9 +87,11 @@ function(odb_compile)
   if(NOT ODB_DB AND NOT ODB_DATABASES)
     message(FATAL_ERROR "odb_compile: DB or DATABASES must be specified")
   endif()
-  if(NOT TARGET ${ODB_TARGET})
-    message(FATAL_ERROR "odb_compile: TARGET '${ODB_TARGET}' does not exist")
-  endif()
+  foreach(_tgt IN LISTS ODB_TARGETS)
+    if(NOT TARGET ${_tgt})
+      message(FATAL_ERROR "odb_compile: TARGET '${_tgt}' does not exist")
+    endif()
+  endforeach()
   if(NOT TARGET ODB::Compiler)
     message(FATAL_ERROR "odb_compile: ODB::Compiler is not available. Make sure FindODB.cmake has been found: find_package(ODB REQUIRED).")
   endif()
@@ -136,7 +138,7 @@ function(odb_compile)
   # Databases and multi-database mode
   set(_DB_LIST "")
   if(ODB_DATABASES)
-    list(APPEND _DB_LIST ${ODB_DATABASES})
+    list(APPEND _DB_LIST ${ODB_DATABASES} common)
   elseif(ODB_DB)
     list(APPEND _DB_LIST ${ODB_DB})
   endif()
@@ -222,24 +224,28 @@ function(odb_compile)
     list(APPEND _ODB_ARGS -I "${_inc}")
   endforeach()
   # - target's own include dirs
-  get_target_property(_t_incs ${ODB_TARGET} INCLUDE_DIRECTORIES)
-  if(_t_incs)
-    foreach(_inc IN LISTS _t_incs)
-      list(APPEND _ODB_ARGS -I "${_inc}")
-    endforeach()
-  endif()
+  foreach(_tgt IN LISTS ODB_TARGETS)
+    get_target_property(_t_incs ${_tgt} INCLUDE_DIRECTORIES)
+    if(_t_incs)
+      foreach(_inc IN LISTS _t_incs)
+        list(APPEND _ODB_ARGS -I "${_inc}")
+      endforeach()
+    endif()
+  endforeach()
 
   # Preprocessor definitions
   foreach(_def IN LISTS ODB_DEFINITIONS)
     list(APPEND _ODB_ARGS "-D${_def}")
   endforeach()
   # - target's own compile definitions
-  get_target_property(_t_defs ${ODB_TARGET} COMPILE_DEFINITIONS)
-  if(_t_defs)
-    foreach(_def IN LISTS _t_defs)
-      list(APPEND _ODB_ARGS "-D${_def}")
-    endforeach()
-  endif()
+  foreach(_tgt IN LISTS ODB_TARGETS)
+    get_target_property(_t_defs ${_tgt} COMPILE_DEFINITIONS)
+    if(_t_defs)
+      foreach(_def IN LISTS _t_defs)
+        list(APPEND _ODB_ARGS "-D${_def}")
+      endforeach()
+    endif()
+  endforeach()
 
   # Additional raw options
   foreach(_opt IN LISTS ODB_ODB_OPTIONS ODB_OPTIONS) # allow both spellings
@@ -258,54 +264,112 @@ function(odb_compile)
   set(_ALL_GEN_CXX "")
   set(_ALL_GEN_FILES "")
   set(_ALL_INPUTS "${_INPUT_SOURCES}")
-
+  
   if(ODB_AT_ONCE)
     foreach(_in IN LISTS _INPUT_SOURCES)
       get_filename_component(_stem "${_in}" NAME_WE)
+      
+      # Common files
       set(_gen_hxx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_HEADER_SUFFIX}")
       set(_gen_ixx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_INLINE_SUFFIX}")
       set(_gen_cxx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_SOURCE_SUFFIX}")
       list(APPEND _ALL_GEN_FILES "${_gen_hxx}" "${_gen_ixx}" "${_gen_cxx}")
       list(APPEND _ALL_GEN_CXX "${_gen_cxx}")
+      
+      # Database-specific files for multi-database mode
+      if(_MDB_MODE)
+        foreach(_db IN LISTS _DB_LIST)
+          if(NOT _db STREQUAL "common")
+            set(_db_hxx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_HEADER_SUFFIX}")
+            set(_db_ixx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_INLINE_SUFFIX}")
+            set(_db_cxx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_SOURCE_SUFFIX}")
+            list(APPEND _ALL_GEN_FILES "${_db_hxx}" "${_db_ixx}" "${_db_cxx}")
+            list(APPEND _ALL_GEN_CXX "${_db_cxx}")
+          endif()
+        endforeach()
+      endif()
+      
+      # Schema files
+      if(ODB_GENERATE_SCHEMA)
+        foreach(_db IN LISTS _DB_LIST)
+          if(NOT _db STREQUAL "common")
+            set(_schema "${ODB_OUTPUT_DIR}/${_stem}-${_db}.sql")
+            list(APPEND _ALL_GEN_FILES "${_schema}")
+          endif()
+        endforeach()
+      endif()
     endforeach()
-
+  
     add_custom_command(
       OUTPUT ${_ALL_GEN_FILES}
       COMMAND $<TARGET_FILE:ODB::Compiler> ${_ODB_ARGS} ${_INPUT_SOURCES}
       BYPRODUCTS ${_ALL_GEN_FILES}
       DEPENDS ${_ALL_INPUTS}
-      COMMENT "ODB: Generating sources for ${ODB_TARGET} (at-once)"
+      COMMENT "ODB: Generating sources for ${ODB_TARGETS} (at-once)"
       VERBATIM
       COMMAND_EXPAND_LISTS
     )
   else()
     foreach(_in IN LISTS _INPUT_SOURCES)
       get_filename_component(_stem "${_in}" NAME_WE)
+      
+      # Collect all expected output files
+      set(_this_gen_files "")
+      
+      # Common files
       set(_gen_hxx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_HEADER_SUFFIX}")
       set(_gen_ixx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_INLINE_SUFFIX}")
       set(_gen_cxx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_SOURCE_SUFFIX}")
+      list(APPEND _this_gen_files "${_gen_hxx}" "${_gen_ixx}" "${_gen_cxx}")
+      list(APPEND _ALL_GEN_CXX "${_gen_cxx}")
+      
+      # Database-specific files for multi-database mode
+      if(_MDB_MODE)
+        foreach(_db IN LISTS _DB_LIST)
+          if(NOT _db STREQUAL "common")
+            set(_db_hxx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_HEADER_SUFFIX}")
+            set(_db_ixx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_INLINE_SUFFIX}")
+            set(_db_cxx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_SOURCE_SUFFIX}")
+            list(APPEND _this_gen_files "${_db_hxx}" "${_db_ixx}" "${_db_cxx}")
+            list(APPEND _ALL_GEN_CXX "${_db_cxx}")
+          endif()
+        endforeach()
+      endif()
+      
+      # Schema files
+      if(ODB_GENERATE_SCHEMA)
+        foreach(_db IN LISTS _DB_LIST)
+          if(NOT _db STREQUAL "common")
+            set(_schema "${ODB_OUTPUT_DIR}/${_stem}-${_db}.sql")
+            list(APPEND _this_gen_files "${_schema}")
+          endif()
+        endforeach()
+      endif()
+      
       add_custom_command(
-        OUTPUT "${_gen_hxx}" "${_gen_ixx}" "${_gen_cxx}"
+        OUTPUT ${_this_gen_files}
         COMMAND $<TARGET_FILE:ODB::Compiler> ${_ODB_ARGS} "${_in}"
-        BYPRODUCTS "${_gen_hxx}" "${_gen_ixx}" "${_gen_cxx}"
+        BYPRODUCTS ${_this_gen_files}
         DEPENDS "${_in}"
         COMMENT "ODB: Generating sources for ${_stem}"
         VERBATIM
         COMMAND_EXPAND_LISTS
       )
-      list(APPEND _ALL_GEN_FILES "${_gen_hxx}" "${_gen_ixx}" "${_gen_cxx}")
-      list(APPEND _ALL_GEN_CXX "${_gen_cxx}")
+      
+      list(APPEND _ALL_GEN_FILES ${_this_gen_files})
     endforeach()
   endif()
 
-  # Grouping target
-  set(_GEN_TARGET "odb_gen_${ODB_TARGET}")
-  add_custom_target(${_GEN_TARGET} DEPENDS ${_ALL_GEN_FILES})
+  foreach(ODB_TARGET IN LISTS ODB_TARGETS)
+    # Grouping target
+    set(_GEN_TARGET "odb_gen_${ODB_TARGET}")
+    add_custom_target(${_GEN_TARGET} DEPENDS ${_ALL_GEN_FILES})
 
-  # Include generated sources and depend on generator
-  target_sources(${ODB_TARGET} PRIVATE ${_ALL_GEN_CXX})
-  add_dependencies(${ODB_TARGET} ${_GEN_TARGET})
-  target_include_directories(${ODB_TARGET} PRIVATE "${ODB_OUTPUT_DIR}")
+    # Include generated sources and depend on generator
+    target_sources(${ODB_TARGET} PRIVATE ${_ALL_GEN_CXX})
+    add_dependencies(${ODB_TARGET} ${_GEN_TARGET})
+    target_include_directories(${ODB_TARGET} PRIVATE "${ODB_OUTPUT_DIR}")
+  endforeach()
 
   # Auto-link libraries (unless disabled). 'common' does not add any libs.
   if(NOT ODB_NO_AUTO_LINK)
@@ -343,8 +407,11 @@ function(odb_compile)
         list(APPEND _TO_LINK ${_t})
       endif()
     endforeach()
+
     if(_TO_LINK)
-      target_link_libraries(${ODB_TARGET} PRIVATE ${_TO_LINK})
+      foreach(ODB_TARGET IN LISTS ODB_TARGETS)
+        target_link_libraries(${ODB_TARGET} PRIVATE ${_TO_LINK})
+      endforeach()
     endif()
   endif()
 
