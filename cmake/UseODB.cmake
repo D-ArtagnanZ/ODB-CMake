@@ -1,5 +1,5 @@
 # ===================================================================================
-# UseODB.cmake (fixed for proper multi-database/common handling)
+# UseODB.cmake (fixed for proper multi-database/common and at-once handling)
 #
 # References:
 #   - https://www.codesynthesis.com/products/odb/doc/odb.xhtml
@@ -17,7 +17,7 @@
 #     [INCLUDE_DIRS <dirs...>]                    # extra -I passed to 'odb'
 #     [DEFINITIONS <defs...>]                     # passed as -D<def>
 #     [PROFILES <boost|qt ...>]                   # adds --profile and links ODB::Boost/ODB::Qt if present
-#     [ODB_OPTIONS <opts...>]                     # raw passthrough options to 'odb'
+#     [OPTIONS <opts...>]                         # raw passthrough options to 'odb'
 #     [MULTI_DATABASE <dynamic|static>]           # explicitly enable multi-database mode
 #
 #     [GENERATE_QUERY] [GENERATE_SESSION] [GENERATE_SCHEMA]
@@ -26,7 +26,8 @@
 #     [TABLE_PREFIX <prefix>]
 #     [CHANGELOG <file>] [CHANGELOG_DIR <dir>]
 #
-#     [AT_ONCE]                                   # compile all SOURCES in one invocation
+#     [AT_ONCE [<basename>]]                      # compile all SOURCES in one invocation
+#                                                 # basename defaults to first target name
 #     [OUT_VAR <var>]                             # PARENT_SCOPE var to receive generated .cxx list
 #     [NO_AUTO_LINK]                              # do not auto-link ODB libraries
 #   )
@@ -45,7 +46,6 @@ function(odb_compile)
     GENERATE_SESSION
     GENERATE_SCHEMA
     GENERATE_PREPARED
-    AT_ONCE
     NO_AUTO_LINK
   )
   set(_OneValue
@@ -61,6 +61,7 @@ function(odb_compile)
     CHANGELOG_DIR
     OUT_VAR
     MULTI_DATABASE
+    AT_ONCE  # Can optionally take a value for the base name
   )
   set(_MultiValue
     TARGETS
@@ -68,7 +69,7 @@ function(odb_compile)
     INCLUDE_DIRS
     DEFINITIONS
     DATABASES
-    ODB_OPTIONS
+    OPTIONS
     PROFILES
   )
 
@@ -260,56 +261,86 @@ function(odb_compile)
     --output-dir "${ODB_OUTPUT_DIR}"
   )
 
+  # Determine if AT_ONCE mode is enabled
+  set(_USE_AT_ONCE FALSE)
+  set(_AT_ONCE_BASENAME "")
+  if(DEFINED ODB_AT_ONCE)
+    set(_USE_AT_ONCE TRUE)
+    if(ODB_AT_ONCE AND NOT ODB_AT_ONCE STREQUAL "TRUE" AND NOT ODB_AT_ONCE STREQUAL "ON")
+      # AT_ONCE has a value, use it as basename
+      set(_AT_ONCE_BASENAME "${ODB_AT_ONCE}")
+    else()
+      # AT_ONCE is just TRUE/ON, derive basename from first target
+      list(GET ODB_TARGETS 0 _first_target)
+      set(_AT_ONCE_BASENAME "${_first_target}")
+    endif()
+  endif()
+
   # Compute generated files
   set(_ALL_GEN_CXX "")
   set(_ALL_GEN_FILES "")
   set(_ALL_INPUTS "${_INPUT_SOURCES}")
   
-  if(ODB_AT_ONCE)
-    foreach(_in IN LISTS _INPUT_SOURCES)
-      get_filename_component(_stem "${_in}" NAME_WE)
-      
-      # Common files
-      set(_gen_hxx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_HEADER_SUFFIX}")
-      set(_gen_ixx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_INLINE_SUFFIX}")
-      set(_gen_cxx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_SOURCE_SUFFIX}")
-      list(APPEND _ALL_GEN_FILES "${_gen_hxx}" "${_gen_ixx}" "${_gen_cxx}")
-      list(APPEND _ALL_GEN_CXX "${_gen_cxx}")
-      
-      # Database-specific files for multi-database mode
-      if(_MDB_MODE)
-        foreach(_db IN LISTS _DB_LIST)
-          if(NOT _db STREQUAL "common")
-            set(_db_hxx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_HEADER_SUFFIX}")
-            set(_db_ixx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_INLINE_SUFFIX}")
-            set(_db_cxx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_SOURCE_SUFFIX}")
-            list(APPEND _ALL_GEN_FILES "${_db_hxx}" "${_db_ixx}" "${_db_cxx}")
-            list(APPEND _ALL_GEN_CXX "${_db_cxx}")
-          endif()
-        endforeach()
-      endif()
-      
-      # Schema files
-      if(ODB_GENERATE_SCHEMA)
-        foreach(_db IN LISTS _DB_LIST)
-          if(NOT _db STREQUAL "common")
-            set(_schema "${ODB_OUTPUT_DIR}/${_stem}-${_db}.sql")
-            list(APPEND _ALL_GEN_FILES "${_schema}")
-          endif()
-        endforeach()
-      endif()
-    endforeach()
-  
+  if(_USE_AT_ONCE)
+    # When using --at-once with multiple files, we need --input-name
+    list(LENGTH _INPUT_SOURCES _num_sources)
+    
+    if(_num_sources GREATER 1)
+      # Multiple sources: must use --input-name
+      set(_stem "${_AT_ONCE_BASENAME}")
+      set(_input_name_path "${ODB_OUTPUT_DIR}/${_stem}")
+      list(APPEND _ODB_ARGS --at-once --input-name "${_input_name_path}")
+    elseif(_num_sources EQUAL 1)
+      # Single source: --at-once is allowed without --input-name
+      list(GET _INPUT_SOURCES 0 _single_source)
+      get_filename_component(_stem "${_single_source}" NAME_WE)
+      list(APPEND _ODB_ARGS --at-once)
+    else()
+      message(FATAL_ERROR "odb_compile: No sources provided for AT_ONCE mode")
+    endif()
+    
+    # Expected output files for at-once mode
+    # Common files
+    set(_gen_hxx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_HEADER_SUFFIX}")
+    set(_gen_ixx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_INLINE_SUFFIX}")
+    set(_gen_cxx "${ODB_OUTPUT_DIR}/${_stem}-odb${ODB_SOURCE_SUFFIX}")
+    list(APPEND _ALL_GEN_FILES "${_gen_hxx}" "${_gen_ixx}" "${_gen_cxx}")
+    list(APPEND _ALL_GEN_CXX "${_gen_cxx}")
+    
+    # Database-specific files for multi-database mode
+    if(_MDB_MODE)
+      foreach(_db IN LISTS _DB_LIST)
+        if(NOT _db STREQUAL "common")
+          set(_db_hxx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_HEADER_SUFFIX}")
+          set(_db_ixx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_INLINE_SUFFIX}")
+          set(_db_cxx "${ODB_OUTPUT_DIR}/${_stem}-odb-${_db}${ODB_SOURCE_SUFFIX}")
+          list(APPEND _ALL_GEN_FILES "${_db_hxx}" "${_db_ixx}" "${_db_cxx}")
+          list(APPEND _ALL_GEN_CXX "${_db_cxx}")
+        endif()
+      endforeach()
+    endif()
+    
+    # Schema files
+    if(ODB_GENERATE_SCHEMA)
+      foreach(_db IN LISTS _DB_LIST)
+        if(NOT _db STREQUAL "common")
+          set(_schema "${ODB_OUTPUT_DIR}/${_stem}-${_db}.sql")
+          list(APPEND _ALL_GEN_FILES "${_schema}")
+        endif()
+      endforeach()
+    endif()
+    
     add_custom_command(
       OUTPUT ${_ALL_GEN_FILES}
       COMMAND $<TARGET_FILE:ODB::Compiler> ${_ODB_ARGS} ${_INPUT_SOURCES}
       BYPRODUCTS ${_ALL_GEN_FILES}
       DEPENDS ${_ALL_INPUTS}
-      COMMENT "ODB: Generating sources for ${ODB_TARGETS} (at-once)"
+      COMMENT "ODB: Generating sources for ${ODB_TARGETS} (at-once mode, output: ${_stem})"
       VERBATIM
       COMMAND_EXPAND_LISTS
     )
   else()
+    # Individual file processing (default)
     foreach(_in IN LISTS _INPUT_SOURCES)
       get_filename_component(_stem "${_in}" NAME_WE)
       
