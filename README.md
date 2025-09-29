@@ -57,6 +57,8 @@ odb_compile(
   # OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/odb_gen
   # PROFILES boost qt
   # STANDARD c++17
+  # AT_ONCE basename
+  # ... see UseODB.cmake for detail
 )
 ```
 
@@ -102,7 +104,8 @@ odb_compile(
   PROFILES boost
 )
 
-target_link_libraries(myapp PRIVATE ODB::ODB ODB::SQLite)
+# UseODB.cmake link libraries automatically
+# target_link_libraries(myapp PRIVATE ODB::ODB ODB::SQLite)
 ```
 
 ---
